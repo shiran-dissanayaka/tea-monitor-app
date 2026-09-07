@@ -9,3 +9,4 @@ dist/
 
 expo-env.d.ts
 # @end expo-clisrc/data/credentials.ts
+src/data/credentials.ts
