@@ -1,9 +1,8 @@
 /**
- * Gitignored. Not committed, not shared.
- *
- * Paste the read-only app user here after creating it in ThingsBoard.
+ * Values come from EAS environment variables at build time, or from .env
+ * during local development. No secret is committed.
  */
 export const CREDENTIALS = {
-  username: 'tharakan889@gmail.com',
-  password: 'AWXjFrj4N23jDGT',
+  username: process.env.EXPO_PUBLIC_TB_USERNAME ?? '',
+  password: process.env.EXPO_PUBLIC_TB_PASSWORD ?? '',
 };
