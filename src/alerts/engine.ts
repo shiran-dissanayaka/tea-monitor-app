@@ -8,8 +8,15 @@ export interface AlertSettings {
   vibrate: boolean;
   sound: boolean;
   band: Record<Process, { low: number; high: number }>;
-  /** When true, runs begin and end only when the user says so. */
   manualOverride: Record<Process, boolean>;
+  /**
+   * Fermentation detection, tunable on the phone so thresholds can be adjusted
+   * against real batches without a rebuild. Degrees above ambient, and how long
+   * the gap must hold.
+   */
+  fermentStartGap: number;
+  fermentEndGap: number;
+  fermentHoldMinutes: number;
 }
 
 export const DEFAULT_SETTINGS: AlertSettings = {
@@ -21,22 +28,27 @@ export const DEFAULT_SETTINGS: AlertSettings = {
   sound: true,
   band: {
     withering: { low: 20, high: 32 },
-    fermentation: { low: 24, high: 29 },
+    fermentation: { low: 24, high: 32 },
   },
   manualOverride: { withering: false, fermentation: false },
+  fermentStartGap: 1.5,
+  fermentEndGap: 0.8,
+  fermentHoldMinutes: 3,
 };
 
 /**
- * Detection rule, per Dr. Namal's decision: infer the run from the readings,
- * with a manual override in Settings for when detection is wrong.
+ * How a run is detected, in order of preference.
  *
- * A run starts when the average departs from the idle baseline by more than
- * `startDelta` and stays there for `holdMs`; it ends when it comes back within
- * `endDelta` for the same hold. Fermentation has a clear exotherm so this is
- * reliable; withering tracks ambient closely, so its margin is deliberately
- * tight and the override matters more there.
+ * 1. session   The node publishes its own run flag (WTH_SessionActive).
+ *              Authoritative — no threshold, no guessing.
+ * 2. exotherm  Fermentation generates heat, so the bed sits above the
+ *              separately measured ambient. A sustained gap means a run.
+ * 3. baseline  Neither field present. Falls back to a rolling average of the
+ *              idle temperature and watches for a departure from it.
  */
-const DETECT: Record<Process, { startDelta: number; endDelta: number; holdMs: number }> = {
+type Mode = 'session' | 'exotherm' | 'baseline';
+
+const BASELINE: Record<Process, { startDelta: number; endDelta: number; holdMs: number }> = {
   withering: { startDelta: 1.2, endDelta: 0.6, holdMs: 4 * 60_000 },
   fermentation: { startDelta: 0.8, endDelta: 0.5, holdMs: 3 * 60_000 },
 };
@@ -76,49 +88,65 @@ export class ProcessDetector {
     this.emit({ id: uid(), kind, process: this.process, deviceId: this.deviceId, title, body, at });
   }
 
-  /** Called for each incoming reading. `active` is the run in progress, if any. */
-  onPoint(pt: ThermalPoint, active: ThermalProfile | null, s: AlertSettings): 'start' | 'end' | null {
-    const label = PROCESS_LABEL[this.process];
+  /** Picks the best available method for this reading. */
+  private modeFor(pt: ThermalPoint): Mode {
+    if (pt.sessionActive != null) return 'session';
+    if (pt.ambient != null) return 'exotherm';
+    return 'baseline';
+  }
 
+  onPoint(pt: ThermalPoint, active: ThermalProfile | null, s: AlertSettings): 'start' | 'end' | null {
     if (this.staleFired && this.lastPointAt) {
       const gap = pt.t - this.lastPointAt;
       this.staleFired = false;
-      this.alert('data_resumed', 'Readings resumed', `Gap of ${fmtDuration(gap)}, camera back online`);
+      this.alert('data_resumed', 'Readings resumed', `Gap of ${fmtDuration(gap)}, node back online`);
     }
     this.lastPointAt = pt.t;
 
-    if (active) {
-      this.checkBand(pt, s);
-      if (s.manualOverride[this.process]) return null;
-      return this.watchFor('end', pt, active) ? 'end' : null;
+    if (active) this.checkBand(pt, s);
+    if (s.manualOverride[this.process]) return null;
+
+    const mode = this.modeFor(pt);
+
+    // The hardware knows. Trust it, and skip the hold entirely.
+    if (mode === 'session') {
+      this.candidateSince = null;
+      if (pt.sessionActive && !active) return 'start';
+      if (!pt.sessionActive && active) return 'end';
+      return null;
     }
 
-    // Idle: track the ambient baseline so a departure is meaningful.
-    this.baseline = this.baseline == null ? pt.avg : this.baseline * 0.9 + pt.avg * 0.1;
-    if (s.manualOverride[this.process]) return null;
-    return this.watchFor('start', pt, null) ? 'start' : null;
+    if (mode === 'exotherm') {
+      const gap = pt.avg - (pt.ambient ?? pt.avg);
+      const hold = s.fermentHoldMinutes * 60_000;
+      const qualifies = active ? gap <= s.fermentEndGap : gap >= s.fermentStartGap;
+      return this.sustained(qualifies, pt.t, hold) ? (active ? 'end' : 'start') : null;
+    }
+
+    // Baseline fallback.
+    const cfg = BASELINE[this.process];
+    if (!active) {
+      this.baseline = this.baseline == null ? pt.avg : this.baseline * 0.9 + pt.avg * 0.1;
+      const qualifies =
+        this.baseline != null && Math.abs(pt.avg - this.baseline) >= cfg.startDelta;
+      return this.sustained(qualifies, pt.t, cfg.holdMs) ? 'start' : null;
+    }
+    const startTemp = active.points[0]?.avg ?? pt.avg;
+    const qualifies = Math.abs(pt.avg - startTemp) <= cfg.endDelta;
+    return this.sustained(qualifies, pt.t, cfg.holdMs) ? 'end' : null;
   }
 
-  private watchFor(want: 'start' | 'end', pt: ThermalPoint, active: ThermalProfile | null) {
-    const cfg = DETECT[this.process];
-    let qualifies: boolean;
-
-    if (want === 'start') {
-      qualifies = this.baseline != null && Math.abs(pt.avg - this.baseline) >= cfg.startDelta;
-    } else {
-      const start = active!.points[0]?.avg ?? pt.avg;
-      qualifies = Math.abs(pt.avg - start) <= cfg.endDelta;
-    }
-
+  /** True once a condition has held continuously for holdMs. */
+  private sustained(qualifies: boolean, t: number, holdMs: number) {
     if (!qualifies) {
       this.candidateSince = null;
       return false;
     }
     if (this.candidateSince == null) {
-      this.candidateSince = pt.t;
+      this.candidateSince = t;
       return false;
     }
-    if (pt.t - this.candidateSince >= cfg.holdMs) {
+    if (t - this.candidateSince >= holdMs) {
       this.candidateSince = null;
       return true;
     }
@@ -128,15 +156,13 @@ export class ProcessDetector {
   private checkBand(pt: ThermalPoint, s: AlertSettings) {
     if (!s.onOutOfBand) return;
     const { low, high } = s.band[this.process];
-    const out = pt.avg > high || pt.avg < low;
-    if (!out) return;
+    if (pt.avg <= high && pt.avg >= low) return;
     if (Date.now() - this.lastBandAlertAt < REPEAT_BAND_MS) return;
     this.lastBandAlertAt = Date.now();
     const dir = pt.avg > high ? `above ${high} °C` : `below ${low} °C`;
     this.alert('out_of_band', `Bed ${dir}`, `Currently ${fmtTemp(pt.avg)}`);
   }
 
-  /** Called on a timer, not by a reading — that is the whole point. */
   checkStale(active: ThermalProfile | null, s: AlertSettings) {
     if (!s.onDataStopped || !active || this.staleFired || !this.lastPointAt) return;
     if (Date.now() - this.lastPointAt < STALE_MS) return;
@@ -150,11 +176,12 @@ export class ProcessDetector {
 
   announceStart(p: ThermalProfile, s: AlertSettings) {
     if (!s.onStart) return null;
-    const first = p.points[0]?.avg ?? 0;
+    const first = p.points[0];
+    const extra = first?.ambient != null ? `, ambient ${fmtTemp(first.ambient)}` : '';
     this.alert(
       'started',
       `${PROCESS_LABEL[p.process]} started`,
-      `${p.location} loaded at ${fmtTemp(first)}`,
+      `${p.location} loaded at ${fmtTemp(first?.avg ?? 0)}${extra}`,
       p.startedAt,
     );
     return true;
@@ -163,12 +190,12 @@ export class ProcessDetector {
   announceEnd(p: ThermalProfile, s: AlertSettings) {
     if (!s.onEnd) return null;
     const end = p.points[p.points.length - 1];
-    const peakPt = p.points.reduce((a, b) => (b.max > a.max ? b : a), p.points[0]);
+    const peak = p.points.reduce((a, b) => (b.max > a.max ? b : a), p.points[0]);
     this.alert(
       'ended',
       `${PROCESS_LABEL[p.process]} finished`,
       `${p.location} ran ${fmtDuration((p.endedAt ?? Date.now()) - p.startedAt)}, ended at ` +
-        `${fmtTemp(end?.avg ?? 0)}. Peak was ${fmtTemp(peakPt?.max ?? 0)} at ${fmtClock(peakPt?.t ?? 0)}.`,
+        `${fmtTemp(end?.avg ?? 0)}. Peak was ${fmtTemp(peak?.max ?? 0)} at ${fmtClock(peak?.t ?? 0)}.`,
       p.endedAt ?? Date.now(),
     );
     return true;

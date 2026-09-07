@@ -6,9 +6,7 @@ import { Process } from '../../src/data/types';
 import { useStore } from '../../src/store';
 import { C, RADIUS } from '../../src/theme';
 
-function Row({
-  title, note, children,
-}: { title: string; note?: string; children: React.ReactNode }) {
+function Row({ title, note, children }: { title: string; note?: string; children: React.ReactNode }) {
   return (
     <View style={s.row}>
       <View style={{ flex: 1 }}>
@@ -31,14 +29,16 @@ function Toggle({ value, onChange }: { value: boolean; onChange: (v: boolean) =>
   );
 }
 
-function Stepper({ value, onChange }: { value: number; onChange: (v: number) => void }) {
+function Stepper({
+  value, onChange, step = 0.5, unit = '°C', dp = 1,
+}: { value: number; onChange: (v: number) => void; step?: number; unit?: string; dp?: number }) {
   return (
     <View style={s.stepper}>
-      <Pressable style={s.stepBtn} onPress={() => onChange(+(value - 0.5).toFixed(1))}>
+      <Pressable style={s.stepBtn} onPress={() => onChange(+(value - step).toFixed(2))}>
         <Text style={s.stepGlyph}>−</Text>
       </Pressable>
-      <Text style={s.stepValue}>{value.toFixed(1)} °C</Text>
-      <Pressable style={s.stepBtn} onPress={() => onChange(+(value + 0.5).toFixed(1))}>
+      <Text style={s.stepValue}>{value.toFixed(dp)} {unit}</Text>
+      <Pressable style={s.stepBtn} onPress={() => onChange(+(value + step).toFixed(2))}>
         <Text style={s.stepGlyph}>+</Text>
       </Pressable>
     </View>
@@ -86,6 +86,34 @@ export default function Settings() {
           </Row>
         </View>
 
+        <Text style={s.group}>Detecting a fermentation run</Text>
+        <View style={s.card}>
+          <Row
+            title="Start above ambient"
+            note="The bed must sit this far above the measured ambient temperature."
+          >
+            <Stepper
+              value={settings.fermentStartGap}
+              onChange={(v) => set({ fermentStartGap: Math.max(0.2, v) })}
+            />
+          </Row>
+          <Row title="Finish within" note="Run ends when the gap closes back to this.">
+            <Stepper
+              value={settings.fermentEndGap}
+              onChange={(v) => set({ fermentEndGap: Math.max(0.1, v) })}
+            />
+          </Row>
+          <Row title="Hold for" note="Stops a brief spike raising a false alert.">
+            <Stepper
+              value={settings.fermentHoldMinutes}
+              onChange={(v) => set({ fermentHoldMinutes: Math.max(1, v) })}
+              step={1}
+              unit="min"
+              dp={0}
+            />
+          </Row>
+        </View>
+
         <Text style={s.group}>Fermentation band</Text>
         <View style={s.card}>
           <Row title="Lower limit">
@@ -110,7 +138,7 @@ export default function Settings() {
         <View style={s.card}>
           <Row
             title="Mark withering runs myself"
-            note="Withering follows the shed temperature closely, so detection can miss. Turn this on to control it by hand."
+            note="Normally taken from the trough's own session flag. Turn this on to control it by hand."
           >
             <Toggle
               value={settings.manualOverride.withering}
@@ -170,7 +198,7 @@ const s = StyleSheet.create({
     borderWidth: 1, borderColor: C.line, alignItems: 'center', justifyContent: 'center',
   },
   stepGlyph: { color: C.ink2, fontSize: 16, lineHeight: 18 },
-  stepValue: { color: C.ink, fontSize: 15, fontWeight: '600', minWidth: 62, textAlign: 'right' },
+  stepValue: { color: C.ink, fontSize: 15, fontWeight: '600', minWidth: 68, textAlign: 'right' },
   warn: {
     backgroundColor: C.warm + '1A', borderColor: C.warm + '47', borderWidth: 1,
     borderRadius: RADIUS.chip, padding: 12, marginBottom: 8,

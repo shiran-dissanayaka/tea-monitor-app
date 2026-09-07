@@ -2,7 +2,7 @@ import React from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { fmtClock, fmtDuration } from '../alerts/engine';
 import { METRICS } from '../data/metrics';
-import { Process, PROCESS_LABEL } from '../data/types';
+import { hasBand, Process, PROCESS_LABEL } from '../data/types';
 import { useStore } from '../store';
 import { C, RADIUS } from '../theme';
 import ProfileChart from './ProfileChart';
@@ -14,121 +14,130 @@ export default function ProcessScreen({ process }: { process: Process }) {
   const settings = useStore((s) => s.settings);
   const markStart = useStore((s) => s.markStart);
   const markEnd = useStore((s) => s.markEnd);
-  useStore((s) => s.tick); // re-render the "N seconds ago" line
+  useStore((s) => s.tick);
 
-  const live = freshness !== 'last_recorded';
+  const running = freshness !== 'last_recorded';
   const profile = state.active ?? state.lastRecorded;
-  const accent = live ? C.hot : C.coolSoft;
+  // Value boxes follow the newest reading, which keeps arriving between runs.
+  const latest = state.latest ?? profile?.points[profile.points.length - 1] ?? null;
+  const accent = running ? C.hot : C.coolSoft;
   const chartWidth = width - 36 - 30;
 
-  if (!profile) {
-    return (
-      <View style={[s.screen, s.center]}>
-        <Text style={s.emptyTitle}>No readings yet</Text>
-        <Text style={s.emptyBody}>
-          The first {PROCESS_LABEL[process].toLowerCase()} run will appear here as soon as the
-          sensors report.
-        </Text>
-      </View>
-    );
-  }
-
-  const pts = profile.points;
-  const latest = pts[pts.length - 1];
-  const coolest = Math.min(...pts.map((p) => p.min));
-  const hottest = Math.max(...pts.map((p) => p.max));
-  const elapsed = (profile.endedAt ?? Date.now()) - profile.startedAt;
   const secondsAgo = Math.round((Date.now() - (state.lastPointAt ?? Date.now())) / 1000);
-  const manual = settings.manualOverride[process];
+  const reporting = state.lastPointAt != null && Date.now() - state.lastPointAt < 5 * 60_000;
 
-  const statusText =
-    freshness === 'live'
-      ? `Live, updated ${secondsAgo} second${secondsAgo === 1 ? '' : 's'} ago`
-      : freshness === 'stale'
-        ? `Waiting for readings, none for ${fmtDuration(Date.now() - (state.lastPointAt ?? 0))}`
-        : 'Nothing running. Showing the last recorded profile.';
+  const statusText = running
+    ? freshness === 'live'
+      ? `Run in progress, updated ${secondsAgo} second${secondsAgo === 1 ? '' : 's'} ago`
+      : `Run in progress, no readings for ${fmtDuration(Date.now() - (state.lastPointAt ?? 0))}`
+    : reporting
+      ? `Sensors reporting, no run in progress`
+      : profile
+        ? 'Nothing running. Showing the last recorded profile.'
+        : 'No readings.';
+
+  const band = profile ? hasBand(profile.points) : false;
+  const showsAmbient = profile ? profile.points.every((p) => p.ambient != null) : false;
+  const chartNote = band
+    ? 'Shaded band shows coolest to hottest pixel'
+    : showsAmbient
+      ? 'Dashed line is ambient temperature'
+      : null;
 
   return (
     <ScrollView style={s.screen} contentContainerStyle={{ paddingBottom: 28 }}>
       <View style={s.head}>
         <View>
           <Text style={s.title}>{PROCESS_LABEL[process]}</Text>
-          <Text style={s.sub}>{profile.location}</Text>
+          <Text style={s.sub}>{profile?.location ?? PROCESS_LABEL[process]}</Text>
         </View>
       </View>
+
+      {state.error && (
+        <View style={s.error}>
+          <Text style={s.errorTitle}>Feed problem</Text>
+          <Text style={s.errorBody}>{state.error}</Text>
+        </View>
+      )}
 
       <View style={[s.status, { backgroundColor: accent + '1A', borderColor: accent + '47' }]}>
         <View style={[s.dot, { backgroundColor: accent }]} />
-        <Text style={[s.statusText, { color: live ? C.peak : '#B6C7D4' }]}>{statusText}</Text>
+        <Text style={[s.statusText, { color: running ? C.peak : '#B6C7D4' }]}>{statusText}</Text>
       </View>
 
-      {/* Readings, in the order Dr. Namal specified for this process. */}
-      <View style={s.metrics}>
-        {METRICS[process].map((m) => {
-          const value = m.read(latest);
-          const isState = m.tone === 'state';
-          const on = isState && m.active?.(latest);
-          const valueColour = !live
-            ? C.ink
-            : isState
-              ? on ? C.hot : C.ink3
-              : C.ink;
-          return (
-            <View key={m.key} style={s.metricRow}>
-              <Text style={s.metricLabel}>{m.label}</Text>
-              <View
-                style={[
-                  s.metricBox,
-                  isState && on && live && { borderColor: C.hot + '66', backgroundColor: C.hot + '14' },
-                ]}
-              >
-                <Text style={[s.metricValue, { color: value == null ? C.ink3 : valueColour }]}>
-                  {value ?? 'not reported'}
-                </Text>
+      {latest ? (
+        <View style={s.metrics}>
+          {METRICS[process].map((m) => {
+            const value = m.read(latest);
+            const isState = m.tone === 'state';
+            const on = isState && m.active?.(latest);
+            const valueColour = isState ? (on ? C.hot : C.ink3) : C.ink;
+            return (
+              <View key={m.key} style={s.metricRow}>
+                <Text style={s.metricLabel}>{m.label}</Text>
+                <View
+                  style={[
+                    s.metricBox,
+                    isState && on && { borderColor: C.hot + '66', backgroundColor: C.hot + '14' },
+                  ]}
+                >
+                  <Text style={[s.metricValue, { color: value == null ? C.ink3 : valueColour }]}>
+                    {value ?? 'not reported'}
+                  </Text>
+                </View>
               </View>
-            </View>
-          );
-        })}
-      </View>
-
-      <View style={s.card}>
-        <View style={s.cardHead}>
-          <Text style={s.cardTitle}>{live ? 'Profile' : 'Last recorded'}</Text>
-          <Text style={s.cardMeta}>
-            {fmtClock(profile.startedAt)}
-            {profile.endedAt ? ` to ${fmtClock(profile.endedAt)}` : ' to now'}
-          </Text>
+            );
+          })}
         </View>
-        <Text style={s.chartNote}>Shaded band shows coolest to hottest pixel</Text>
-        <ProfileChart points={pts} width={chartWidth} live={live} />
+      ) : (
+        <Text style={s.waiting}>Waiting for the first reading.</Text>
+      )}
 
-        <View style={s.runStrip}>
-          <View>
-            <Text style={s.mmLabel}>coolest</Text>
-            <Text style={[s.mmValue, { color: C.coolSoft }]}>{coolest.toFixed(1)} °C</Text>
-          </View>
-          <View>
-            <Text style={s.mmLabel}>{live ? 'hottest' : 'peak'}</Text>
-            <Text style={[s.mmValue, { color: C.warm }]}>{hottest.toFixed(1)} °C</Text>
-          </View>
-          <View>
-            <Text style={s.mmLabel}>{live ? 'running' : 'lasted'}</Text>
-            <Text style={[s.mmValue, { color: C.ink }]}>{fmtDuration(elapsed)}</Text>
-          </View>
-        </View>
-      </View>
-
-      {!live && (
+      {profile ? (
         <View style={s.card}>
-          <Text style={s.cardTitle}>Why you are seeing this</Text>
+          <View style={s.cardHead}>
+            <Text style={s.cardTitle}>{state.active ? 'Profile' : 'Last recorded run'}</Text>
+            <Text style={s.cardMeta}>
+              {fmtClock(profile.startedAt)}
+              {profile.endedAt ? ` to ${fmtClock(profile.endedAt)}` : ' to now'}
+            </Text>
+          </View>
+          {chartNote ? <Text style={s.chartNote}>{chartNote}</Text> : <View style={{ height: 10 }} />}
+          <ProfileChart points={profile.points} width={chartWidth} live={!!state.active} />
+
+          <View style={s.runStrip}>
+            <View>
+              <Text style={s.mmLabel}>lowest</Text>
+              <Text style={[s.mmValue, { color: C.coolSoft }]}>
+                {Math.min(...profile.points.map((p) => p.min)).toFixed(1)} °C
+              </Text>
+            </View>
+            <View>
+              <Text style={s.mmLabel}>{state.active ? 'highest' : 'peak'}</Text>
+              <Text style={[s.mmValue, { color: C.warm }]}>
+                {Math.max(...profile.points.map((p) => p.max)).toFixed(1)} °C
+              </Text>
+            </View>
+            <View>
+              <Text style={s.mmLabel}>{state.active ? 'running' : 'lasted'}</Text>
+              <Text style={[s.mmValue, { color: C.ink }]}>
+                {fmtDuration((profile.endedAt ?? Date.now()) - profile.startedAt)}
+              </Text>
+            </View>
+          </View>
+        </View>
+      ) : (
+        <View style={s.card}>
+          <Text style={s.cardTitle}>No completed run yet</Text>
           <Text style={s.explain}>
-            The last reading arrived {fmtDuration(Date.now() - (profile.endedAt ?? 0))} ago and no
-            run is loaded. The app will switch back to live on its own once readings resume.
+            {reporting
+              ? 'The sensors are reporting but no run has been recorded. The profile will appear here once one starts.'
+              : 'Nothing has been recorded on this phone yet.'}
           </Text>
         </View>
       )}
 
-      {manual && (
+      {settings.manualOverride[process] && (
         <Pressable
           style={[s.manual, { borderColor: accent }]}
           onPress={() => (state.active ? markEnd(process) : markStart(process))}
@@ -144,13 +153,17 @@ export default function ProcessScreen({ process }: { process: Process }) {
 
 const s = StyleSheet.create({
   screen: { flex: 1, backgroundColor: C.shell, paddingHorizontal: 18 },
-  center: { justifyContent: 'center', alignItems: 'center', padding: 40 },
-  emptyTitle: { color: C.ink, fontSize: 19, fontWeight: '600', marginBottom: 8 },
-  emptyBody: { color: C.ink2, fontSize: 14, textAlign: 'center', lineHeight: 21 },
 
   head: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 8, marginBottom: 14 },
   title: { color: C.ink, fontSize: 26, fontWeight: '700', letterSpacing: -0.5 },
   sub: { color: C.ink2, fontSize: 13.5, marginTop: 2 },
+
+  error: {
+    backgroundColor: C.warm + '1A', borderColor: C.warm + '55', borderWidth: 1,
+    borderRadius: RADIUS.chip, padding: 12, marginBottom: 12,
+  },
+  errorTitle: { color: C.warm, fontSize: 13.5, fontWeight: '600', marginBottom: 3 },
+  errorBody: { color: C.peak, fontSize: 13, lineHeight: 19 },
 
   status: {
     flexDirection: 'row', alignItems: 'center', gap: 9,
@@ -164,16 +177,11 @@ const s = StyleSheet.create({
   metricRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 },
   metricLabel: { color: C.ink, fontSize: 15.5, fontWeight: '500' },
   metricBox: {
-    minWidth: 118,
-    backgroundColor: C.panel,
-    borderColor: C.line,
-    borderWidth: 1,
-    borderRadius: RADIUS.chip,
-    paddingVertical: 11,
-    paddingHorizontal: 14,
-    alignItems: 'flex-end',
+    minWidth: 118, backgroundColor: C.panel, borderColor: C.line, borderWidth: 1,
+    borderRadius: RADIUS.chip, paddingVertical: 11, paddingHorizontal: 14, alignItems: 'flex-end',
   },
   metricValue: { fontSize: 20, fontWeight: '600', letterSpacing: -0.4 },
+  waiting: { color: C.ink2, fontSize: 14, marginBottom: 18 },
 
   card: {
     backgroundColor: C.panel, borderColor: C.line, borderWidth: 1,
@@ -186,8 +194,7 @@ const s = StyleSheet.create({
   explain: { color: C.ink2, fontSize: 13, lineHeight: 20, marginTop: 6 },
 
   runStrip: {
-    flexDirection: 'row', gap: 24,
-    marginTop: 14, paddingTop: 12,
+    flexDirection: 'row', gap: 24, marginTop: 14, paddingTop: 12,
     borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.line,
   },
   mmLabel: { color: C.ink2, fontSize: 12.5 },
