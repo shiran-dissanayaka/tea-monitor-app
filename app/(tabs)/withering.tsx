@@ -1,12 +1,7 @@
 import React from 'react';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import ProcessScreen from '../../src/components/ProcessScreen';
-import { C } from '../../src/theme';
 
+// Safe area and width are handled inside Screen, so this stays a thin wrapper.
 export default function Withering() {
-  return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: C.shell }} edges={['top']}>
-      <ProcessScreen process="withering" />
-    </SafeAreaView>
-  );
+  return <ProcessScreen process="withering" />;
 }

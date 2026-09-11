@@ -9,7 +9,7 @@ const ADDED_COLUMNS = ['rh REAL', 'fan INTEGER', 'ambient REAL', 'moisture REAL'
 
 export async function initDb() {
   if (db) return db;
-  db = await SQLite.openDatabaseAsync('thermal.db');
+  db = await SQLite.openDatabaseAsync('thermal-live.db');
   await db.execAsync(`
     PRAGMA journal_mode = WAL;
     CREATE TABLE IF NOT EXISTS profiles (

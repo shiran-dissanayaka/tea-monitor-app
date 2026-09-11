@@ -1,14 +1,15 @@
 import React from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { fmtClock, fmtDuration } from '../alerts/engine';
 import { METRICS } from '../data/metrics';
 import { hasBand, Process, PROCESS_LABEL } from '../data/types';
 import { useStore } from '../store';
 import { C, RADIUS } from '../theme';
 import ProfileChart from './ProfileChart';
+import { GUTTER, Screen, useLayout } from './Screen';
 
 export default function ProcessScreen({ process }: { process: Process }) {
-  const { width } = useWindowDimensions();
+  const { contentWidth, wide } = useLayout();
   const state = useStore((s) => s[process]);
   const freshness = useStore((s) => s.freshnessOf(process));
   const settings = useStore((s) => s.settings);
@@ -16,12 +17,13 @@ export default function ProcessScreen({ process }: { process: Process }) {
   const markEnd = useStore((s) => s.markEnd);
   useStore((s) => s.tick);
 
+  // Card padding is 15 each side, plus the page gutter.
+  const chartWidth = contentWidth - GUTTER * 2 - 30;
+
   const running = freshness !== 'last_recorded';
   const profile = state.active ?? state.lastRecorded;
-  // Value boxes follow the newest reading, which keeps arriving between runs.
   const latest = state.latest ?? profile?.points[profile.points.length - 1] ?? null;
   const accent = running ? C.hot : C.coolSoft;
-  const chartWidth = width - 36 - 30;
 
   const secondsAgo = Math.round((Date.now() - (state.lastPointAt ?? Date.now())) / 1000);
   const reporting = state.lastPointAt != null && Date.now() - state.lastPointAt < 5 * 60_000;
@@ -31,7 +33,7 @@ export default function ProcessScreen({ process }: { process: Process }) {
       ? `Run in progress, updated ${secondsAgo} second${secondsAgo === 1 ? '' : 's'} ago`
       : `Run in progress, no readings for ${fmtDuration(Date.now() - (state.lastPointAt ?? 0))}`
     : reporting
-      ? `Sensors reporting, no run in progress`
+      ? 'Sensors reporting, no run in progress'
       : profile
         ? 'Nothing running. Showing the last recorded profile.'
         : 'No readings.';
@@ -45,12 +47,10 @@ export default function ProcessScreen({ process }: { process: Process }) {
       : null;
 
   return (
-    <ScrollView style={s.screen} contentContainerStyle={{ paddingBottom: 28 }}>
+    <Screen>
       <View style={s.head}>
-        <View>
-          <Text style={s.title}>{PROCESS_LABEL[process]}</Text>
-          <Text style={s.sub}>{profile?.location ?? PROCESS_LABEL[process]}</Text>
-        </View>
+        <Text style={[s.title, wide && s.titleWide]}>{PROCESS_LABEL[process]}</Text>
+        <Text style={s.sub}>{profile?.location ?? PROCESS_LABEL[process]}</Text>
       </View>
 
       {state.error && (
@@ -74,14 +74,21 @@ export default function ProcessScreen({ process }: { process: Process }) {
             const valueColour = isState ? (on ? C.hot : C.ink3) : C.ink;
             return (
               <View key={m.key} style={s.metricRow}>
-                <Text style={s.metricLabel}>{m.label}</Text>
+                <Text style={[s.metricLabel, wide && s.metricLabelWide]}>{m.label}</Text>
                 <View
                   style={[
                     s.metricBox,
+                    wide && s.metricBoxWide,
                     isState && on && { borderColor: C.hot + '66', backgroundColor: C.hot + '14' },
                   ]}
                 >
-                  <Text style={[s.metricValue, { color: value == null ? C.ink3 : valueColour }]}>
+                  <Text
+                    style={[
+                      s.metricValue,
+                      wide && s.metricValueWide,
+                      { color: value == null ? C.ink3 : valueColour },
+                    ]}
+                  >
                     {value ?? 'not reported'}
                   </Text>
                 </View>
@@ -147,15 +154,14 @@ export default function ProcessScreen({ process }: { process: Process }) {
           </Text>
         </Pressable>
       )}
-    </ScrollView>
+    </Screen>
   );
 }
 
 const s = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: C.shell, paddingHorizontal: 18 },
-
-  head: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 8, marginBottom: 14 },
+  head: { marginBottom: 14 },
   title: { color: C.ink, fontSize: 26, fontWeight: '700', letterSpacing: -0.5 },
+  titleWide: { fontSize: 32 },
   sub: { color: C.ink2, fontSize: 13.5, marginTop: 2 },
 
   error: {
@@ -175,12 +181,15 @@ const s = StyleSheet.create({
 
   metrics: { gap: 10, marginBottom: 18 },
   metricRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 },
-  metricLabel: { color: C.ink, fontSize: 15.5, fontWeight: '500' },
+  metricLabel: { color: C.ink, fontSize: 15.5, fontWeight: '500', flexShrink: 1 },
+  metricLabelWide: { fontSize: 18 },
   metricBox: {
     minWidth: 118, backgroundColor: C.panel, borderColor: C.line, borderWidth: 1,
     borderRadius: RADIUS.chip, paddingVertical: 11, paddingHorizontal: 14, alignItems: 'flex-end',
   },
+  metricBoxWide: { minWidth: 150, paddingVertical: 14 },
   metricValue: { fontSize: 20, fontWeight: '600', letterSpacing: -0.4 },
+  metricValueWide: { fontSize: 24 },
   waiting: { color: C.ink2, fontSize: 14, marginBottom: 18 },
 
   card: {
