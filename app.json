@@ -9,8 +9,13 @@
     "backgroundColor": "#0C120F",
     "android": {
       "package": "lk.pdn.etic.teathermal",
-      "adaptiveIcon": { "backgroundColor": "#0C120F" },
-      "permissions": ["VIBRATE", "POST_NOTIFICATIONS"]
+      "adaptiveIcon": {
+        "backgroundColor": "#0C120F"
+      },
+      "permissions": [
+        "VIBRATE",
+        "POST_NOTIFICATIONS"
+      ]
     },
     "ios": {
       "bundleIdentifier": "lk.pdn.etic.teathermal",
@@ -18,8 +23,21 @@
     },
     "plugins": [
       "expo-router",
-      ["expo-notifications", { "color": "#F5A63C" }]
+      [
+        "expo-notifications",
+        {
+          "color": "#F5A63C"
+        }
+      ]
     ],
-    "experiments": { "typedRoutes": true }
+    "experiments": {
+      "typedRoutes": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "4516a24e-96e9-4cfc-9216-9b1a8eb75a3e"
+      }
+    }
   }
 }
