@@ -6,7 +6,7 @@ import { hasBand, Process, PROCESS_LABEL } from '../data/types';
 import { useStore } from '../store';
 import { C, RADIUS } from '../theme';
 import ProfileChart from './ProfileChart';
-import { GUTTER, Screen, useLayout } from './Screen';
+import { Screen, useLayout } from './Screen';
 
 export default function ProcessScreen({ process }: { process: Process }) {
   const { contentWidth, wide } = useLayout();
@@ -17,8 +17,8 @@ export default function ProcessScreen({ process }: { process: Process }) {
   const markEnd = useStore((s) => s.markEnd);
   useStore((s) => s.tick);
 
-  // Card padding is 15 each side, plus the page gutter.
-  const chartWidth = contentWidth - GUTTER * 2 - 30;
+  // Card padding is 15 each side.
+  const chartWidth = Math.max(200, contentWidth - 30);
 
   const running = freshness !== 'last_recorded';
   const profile = state.active ?? state.lastRecorded;

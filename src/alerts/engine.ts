@@ -9,11 +9,6 @@ export interface AlertSettings {
   sound: boolean;
   band: Record<Process, { low: number; high: number }>;
   manualOverride: Record<Process, boolean>;
-  /**
-   * Fermentation detection, tunable on the phone so thresholds can be adjusted
-   * against real batches without a rebuild. Degrees above ambient, and how long
-   * the gap must hold.
-   */
   fermentStartGap: number;
   fermentEndGap: number;
   fermentHoldMinutes: number;
@@ -26,9 +21,14 @@ export const DEFAULT_SETTINGS: AlertSettings = {
   onDataStopped: false,
   vibrate: true,
   sound: true,
+  /**
+   * Upper limit is 35 °C for both processes. Beds run near 30 °C in normal
+   * operation, so a lower ceiling fires constantly and trains people to ignore
+   * alerts. Both limits stay adjustable in Settings.
+   */
   band: {
-    withering: { low: 20, high: 32 },
-    fermentation: { low: 24, high: 32 },
+    withering: { low: 20, high: 35 },
+    fermentation: { low: 24, high: 35 },
   },
   manualOverride: { withering: false, fermentation: false },
   fermentStartGap: 1.5,
@@ -88,7 +88,6 @@ export class ProcessDetector {
     this.emit({ id: uid(), kind, process: this.process, deviceId: this.deviceId, title, body, at });
   }
 
-  /** Picks the best available method for this reading. */
   private modeFor(pt: ThermalPoint): Mode {
     if (pt.sessionActive != null) return 'session';
     if (pt.ambient != null) return 'exotherm';
@@ -123,12 +122,10 @@ export class ProcessDetector {
       return this.sustained(qualifies, pt.t, hold) ? (active ? 'end' : 'start') : null;
     }
 
-    // Baseline fallback.
     const cfg = BASELINE[this.process];
     if (!active) {
       this.baseline = this.baseline == null ? pt.avg : this.baseline * 0.9 + pt.avg * 0.1;
-      const qualifies =
-        this.baseline != null && Math.abs(pt.avg - this.baseline) >= cfg.startDelta;
+      const qualifies = this.baseline != null && Math.abs(pt.avg - this.baseline) >= cfg.startDelta;
       return this.sustained(qualifies, pt.t, cfg.holdMs) ? 'start' : null;
     }
     const startTemp = active.points[0]?.avg ?? pt.avg;
@@ -160,7 +157,7 @@ export class ProcessDetector {
     if (Date.now() - this.lastBandAlertAt < REPEAT_BAND_MS) return;
     this.lastBandAlertAt = Date.now();
     const dir = pt.avg > high ? `above ${high} °C` : `below ${low} °C`;
-    this.alert('out_of_band', `Bed ${dir}`, `Currently ${fmtTemp(pt.avg)}`);
+    this.alert('out_of_band', `${PROCESS_LABEL[this.process]} bed ${dir}`, `Currently ${fmtTemp(pt.avg)}`);
   }
 
   checkStale(active: ThermalProfile | null, s: AlertSettings) {
