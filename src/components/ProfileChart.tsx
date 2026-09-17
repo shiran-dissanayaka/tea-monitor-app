@@ -18,6 +18,26 @@ function downsample(points: ThermalPoint[]): ThermalPoint[] {
   return out;
 }
 
+/**
+ * Vertical scale from the 2nd to 98th percentile rather than absolute min and
+ * max. A single dropout reading — an ambient sensor briefly reporting 3 °C —
+ * would otherwise stretch the axis across thirty degrees and flatten the real
+ * variation into a straight line. Values outside the range are clamped to the
+ * edge, so nothing is hidden, it just stops distorting everything else.
+ */
+function scaleFrom(values: number[]) {
+  const sorted = [...values].sort((a, b) => a - b);
+  const at = (p: number) => sorted[Math.min(sorted.length - 1, Math.max(0, Math.floor(p * (sorted.length - 1))))];
+  let lo = at(0.02);
+  let hi = at(0.98);
+  if (hi - lo < 1.5) {
+    const mid = (hi + lo) / 2;
+    lo = mid - 0.75;
+    hi = mid + 0.75;
+  }
+  return { lo: lo - 0.8, hi: hi + 0.8 };
+}
+
 export default function ProfileChart({
   points,
   width,
@@ -33,23 +53,22 @@ export default function ProfileChart({
     const pts = downsample(points);
     if (pts.length < 2) return null;
 
-    // Single-sensor nodes report one temperature, so there is nothing to shade.
-    // The band returns automatically if min and max ever diverge.
     const band = hasBand(pts);
-    // Ambient, when measured, is the reference the detector compares against —
-    // worth drawing so the gap that triggers an alert is visible.
     const ambient = pts.every((p) => p.ambient != null);
 
-    const values = [
+    const { lo, hi } = scaleFrom([
       ...pts.map((p) => p.min),
       ...pts.map((p) => p.max),
       ...(ambient ? pts.map((p) => p.ambient!) : []),
-    ];
-    const lo = Math.min(...values) - 0.8;
-    const hi = Math.max(...values) + 0.8;
+    ]);
 
+    const top = PAD_T;
+    const bottom = H - PAD_B;
     const x = (i: number) => (i / (pts.length - 1)) * width;
-    const y = (v: number) => PAD_T + (1 - (v - lo) / (hi - lo)) * (H - PAD_T - PAD_B);
+    const y = (v: number) => {
+      const raw = top + (1 - (v - lo) / (hi - lo)) * (bottom - top);
+      return Math.min(bottom, Math.max(top, raw)); // clamp outliers to the edge
+    };
 
     const line = pts.map((p, i) => `${i ? 'L' : 'M'} ${x(i)} ${y(p.avg)}`).join(' ');
 
@@ -64,15 +83,13 @@ export default function ProfileChart({
       ? pts.map((p, i) => `${i ? 'L' : 'M'} ${x(i)} ${y(p.ambient!)}`).join(' ')
       : null;
 
-    // With no band, fill lightly under the line so the chart still has weight.
-    const fillPath = band
-      ? null
-      : line + ` L ${x(pts.length - 1)} ${H - PAD_B} L ${x(0)} ${H - PAD_B} Z`;
+    const fillPath = band ? null : line + ` L ${x(pts.length - 1)} ${bottom} L ${x(0)} ${bottom} Z`;
 
     const head = { x: x(pts.length - 1), y: y(pts[pts.length - 1].avg) };
-    const labels = [0.15, 0.4, 0.65, 0.9].map((f) => ({
+    const labels = [0.12, 0.38, 0.64, 0.9].map((f) => ({
+      key: f,
       v: (lo + (hi - lo) * (1 - f)).toFixed(1),
-      y: PAD_T + f * (H - PAD_T - PAD_B) + 4,
+      y: top + f * (bottom - top) + 4,
     }));
 
     return { line, bandPath, ambientPath, fillPath, head, labels };
@@ -85,7 +102,7 @@ export default function ProfileChart({
       <Defs>
         <LinearGradient id="band" x1="0" y1="0" x2="0" y2="1">
           <Stop offset="0" stopColor={accent} stopOpacity={live ? 0.34 : 0.24} />
-          <Stop offset="1" stopColor={C.cool} stopOpacity={live ? 0.22 : 0.14} />
+          <Stop offset="1" stopColor={C.cool} stopOpacity={live ? 0.18 : 0.12} />
         </LinearGradient>
       </Defs>
 
@@ -97,7 +114,7 @@ export default function ProfileChart({
       </G>
 
       {geom.labels.map((l) => (
-        <SvgText key={l.v} x={2} y={l.y} fontSize={11} fill={C.ink3}>
+        <SvgText key={l.key} x={2} y={l.y} fontSize={11} fill={C.ink3}>
           {l.v}
         </SvgText>
       ))}

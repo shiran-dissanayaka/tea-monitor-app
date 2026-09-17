@@ -14,6 +14,8 @@
       },
       "permissions": [
         "VIBRATE",
+        "POST_NOTIFICATIONS",
+        "VIBRATE",
         "POST_NOTIFICATIONS"
       ]
     },
@@ -39,6 +41,12 @@
       "eas": {
         "projectId": "4516a24e-96e9-4cfc-9216-9b1a8eb75a3e"
       }
+    },
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/4516a24e-96e9-4cfc-9216-9b1a8eb75a3e"
     }
   }
 }

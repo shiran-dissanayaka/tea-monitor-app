@@ -1,12 +1,20 @@
-import React from 'react';
+import React, { useMemo, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { fmtClock, fmtDuration } from '../alerts/engine';
 import { METRICS } from '../data/metrics';
-import { hasBand, Process, PROCESS_LABEL } from '../data/types';
+import { hasBand, Process, PROCESS_LABEL, ThermalPoint } from '../data/types';
 import { useStore } from '../store';
 import { C, RADIUS } from '../theme';
 import ProfileChart from './ProfileChart';
 import { Screen, useLayout } from './Screen';
+
+type Window = 'today' | 'full';
+
+const startOfToday = () => {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+};
 
 export default function ProcessScreen({ process }: { process: Process }) {
   const { contentWidth, wide } = useLayout();
@@ -17,13 +25,29 @@ export default function ProcessScreen({ process }: { process: Process }) {
   const markEnd = useStore((s) => s.markEnd);
   useStore((s) => s.tick);
 
-  // Card padding is 15 each side.
+  const [window, setWindow] = useState<Window>('today');
+
   const chartWidth = Math.max(200, contentWidth - 30);
 
   const running = freshness !== 'last_recorded';
   const profile = state.active ?? state.lastRecorded;
   const latest = state.latest ?? profile?.points[profile.points.length - 1] ?? null;
   const accent = running ? C.hot : C.coolSoft;
+
+  /**
+   * A run that carries over midnight — or one that has not ended when it should
+   * have — makes the whole-run chart unreadable. Today's readings are the
+   * default view; the full run stays one tap away.
+   */
+  const { shown, spansEarlierDay } = useMemo(() => {
+    const all: ThermalPoint[] = profile?.points ?? [];
+    const cutoff = startOfToday();
+    const earlier = all.length > 0 && all[0].t < cutoff;
+    if (window === 'full' || !earlier) return { shown: all, spansEarlierDay: earlier };
+    const today = all.filter((p) => p.t >= cutoff);
+    // Fall back to the full run rather than draw a chart from one or two points.
+    return { shown: today.length >= 2 ? today : all, spansEarlierDay: earlier };
+  }, [profile, window]);
 
   const secondsAgo = Math.round((Date.now() - (state.lastPointAt ?? Date.now())) / 1000);
   const reporting = state.lastPointAt != null && Date.now() - state.lastPointAt < 5 * 60_000;
@@ -38,13 +62,15 @@ export default function ProcessScreen({ process }: { process: Process }) {
         ? 'Nothing running. Showing the last recorded profile.'
         : 'No readings.';
 
-  const band = profile ? hasBand(profile.points) : false;
-  const showsAmbient = profile ? profile.points.every((p) => p.ambient != null) : false;
+  const band = shown.length > 0 ? hasBand(shown) : false;
+  const showsAmbient = shown.length > 0 && shown.every((p) => p.ambient != null);
   const chartNote = band
     ? 'Shaded band shows coolest to hottest pixel'
     : showsAmbient
       ? 'Dashed line is ambient temperature'
       : null;
+
+  const showingToday = window === 'today' && spansEarlierDay;
 
   return (
     <Screen>
@@ -100,38 +126,62 @@ export default function ProcessScreen({ process }: { process: Process }) {
         <Text style={s.waiting}>Waiting for the first reading.</Text>
       )}
 
-      {profile ? (
+      {profile && shown.length >= 2 ? (
         <View style={s.card}>
           <View style={s.cardHead}>
             <Text style={s.cardTitle}>{state.active ? 'Profile' : 'Last recorded run'}</Text>
             <Text style={s.cardMeta}>
-              {fmtClock(profile.startedAt)}
-              {profile.endedAt ? ` to ${fmtClock(profile.endedAt)}` : ' to now'}
+              {fmtClock(shown[0].t)}
+              {state.active && window !== 'today' ? ' to now' : ` to ${fmtClock(shown[shown.length - 1].t)}`}
             </Text>
           </View>
+
+          {spansEarlierDay && (
+            <View style={s.range}>
+              {(['today', 'full'] as Window[]).map((w) => (
+                <Pressable
+                  key={w}
+                  style={[s.rangeBtn, window === w && s.rangeBtnOn]}
+                  onPress={() => setWindow(w)}
+                >
+                  <Text style={[s.rangeText, window === w && s.rangeTextOn]}>
+                    {w === 'today' ? 'Today' : 'Full run'}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+          )}
+
           {chartNote ? <Text style={s.chartNote}>{chartNote}</Text> : <View style={{ height: 10 }} />}
-          <ProfileChart points={profile.points} width={chartWidth} live={!!state.active} />
+          <ProfileChart points={shown} width={chartWidth} live={!!state.active} />
 
           <View style={s.runStrip}>
             <View>
               <Text style={s.mmLabel}>lowest</Text>
               <Text style={[s.mmValue, { color: C.coolSoft }]}>
-                {Math.min(...profile.points.map((p) => p.min)).toFixed(1)} °C
+                {Math.min(...shown.map((p) => p.min)).toFixed(1)} °C
               </Text>
             </View>
             <View>
-              <Text style={s.mmLabel}>{state.active ? 'highest' : 'peak'}</Text>
+              <Text style={s.mmLabel}>highest</Text>
               <Text style={[s.mmValue, { color: C.warm }]}>
-                {Math.max(...profile.points.map((p) => p.max)).toFixed(1)} °C
+                {Math.max(...shown.map((p) => p.max)).toFixed(1)} °C
               </Text>
             </View>
             <View>
-              <Text style={s.mmLabel}>{state.active ? 'running' : 'lasted'}</Text>
+              <Text style={s.mmLabel}>{showingToday ? 'today' : state.active ? 'running' : 'lasted'}</Text>
               <Text style={[s.mmValue, { color: C.ink }]}>
-                {fmtDuration((profile.endedAt ?? Date.now()) - profile.startedAt)}
+                {fmtDuration(shown[shown.length - 1].t - shown[0].t)}
               </Text>
             </View>
           </View>
+
+          {showingToday && (
+            <Text style={s.windowNote}>
+              This run began {fmtClock(profile.startedAt)} on an earlier day. Tap Full run to see all
+              of it.
+            </Text>
+          )}
         </View>
       ) : (
         <View style={s.card}>
@@ -201,6 +251,16 @@ const s = StyleSheet.create({
   cardMeta: { color: C.ink3, fontSize: 12.5 },
   chartNote: { color: C.ink3, fontSize: 12.5, marginTop: 2, marginBottom: 10 },
   explain: { color: C.ink2, fontSize: 13, lineHeight: 20, marginTop: 6 },
+  windowNote: { color: C.ink3, fontSize: 12, lineHeight: 17, marginTop: 10 },
+
+  range: {
+    flexDirection: 'row', gap: 6, backgroundColor: C.panel2,
+    borderRadius: 11, padding: 4, marginTop: 10, marginBottom: 4,
+  },
+  rangeBtn: { flex: 1, paddingVertical: 7, borderRadius: 8, alignItems: 'center' },
+  rangeBtnOn: { backgroundColor: C.panel },
+  rangeText: { color: C.ink2, fontSize: 13, fontWeight: '500' },
+  rangeTextOn: { color: C.ink },
 
   runStrip: {
     flexDirection: 'row', gap: 24, marginTop: 14, paddingTop: 12,
