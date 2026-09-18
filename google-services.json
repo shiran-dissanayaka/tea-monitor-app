@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "248449881506",
+    "project_id": "tea-thermal-monitor",
+    "storage_bucket": "tea-thermal-monitor.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:248449881506:android:bbea22b5b51a8484ed0efb",
+        "android_client_info": {
+          "package_name": "lk.pdn.etic.teathermal"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAUoDtoIFefHevW2VLHIL3YX-nLgphhHV4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
