@@ -7,14 +7,15 @@
     "orientation": "default",
     "userInterfaceStyle": "dark",
     "backgroundColor": "#0C120F",
+    "icon": "./assets/icon.png",
     "android": {
       "package": "lk.pdn.etic.teathermal",
+      "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#0C120F"
       },
       "permissions": [
-        "VIBRATE",
-        "POST_NOTIFICATIONS",
         "VIBRATE",
         "POST_NOTIFICATIONS"
       ]
@@ -23,15 +24,27 @@
       "bundleIdentifier": "lk.pdn.etic.teathermal",
       "supportsTablet": true
     },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
     "plugins": [
       "expo-router",
       [
         "expo-notifications",
         {
+          "icon": "./assets/notification-icon.png",
           "color": "#F5A63C"
         }
       ],
-      "expo-sqlite"
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-icon.png",
+          "imageWidth": 200,
+          "resizeMode": "contain",
+          "backgroundColor": "#0C120F"
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true
@@ -41,12 +54,6 @@
       "eas": {
         "projectId": "4516a24e-96e9-4cfc-9216-9b1a8eb75a3e"
       }
-    },
-    "runtimeVersion": {
-      "policy": "appVersion"
-    },
-    "updates": {
-      "url": "https://u.expo.dev/4516a24e-96e9-4cfc-9216-9b1a8eb75a3e"
     }
   }
 }

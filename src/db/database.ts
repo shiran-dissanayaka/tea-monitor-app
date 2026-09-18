@@ -4,8 +4,12 @@ import { Process, ThermalAlert, ThermalPoint, ThermalProfile } from '../data/typ
 let db: SQLite.SQLiteDatabase | null = null;
 const RETAIN_DAYS = 30;
 
-/** Columns added after the first release. Existing phones get them by ALTER. */
-const ADDED_COLUMNS = ['rh REAL', 'fan INTEGER', 'ambient REAL', 'moisture REAL'];
+/** How long one event stays claimed, so a push and a local detection of the
+ *  same run start cannot both buzz the phone. Runs last hours, so nothing
+ *  legitimate repeats inside this window. */
+const CLAIM_WINDOW_MS = 15 * 60_000;
+
+const ADDED_COLUMNS = ['rh REAL', 'fan INTEGER', 'ambient REAL', 'moisture REAL', 'weight REAL', 'session INTEGER'];
 
 export async function initDb() {
   if (db) return db;
@@ -25,7 +29,7 @@ export async function initDb() {
       t INTEGER NOT NULL,
       min REAL NOT NULL, avg REAL NOT NULL, max REAL NOT NULL,
       fl REAL, fr REAL, bl REAL, br REAL,
-      rh REAL, fan INTEGER, ambient REAL, moisture REAL,
+      rh REAL, fan INTEGER, ambient REAL, moisture REAL, weight REAL, session INTEGER,
       PRIMARY KEY (profile_id, t)
     );
     CREATE TABLE IF NOT EXISTS alerts (
@@ -33,18 +37,19 @@ export async function initDb() {
       kind TEXT NOT NULL, process TEXT NOT NULL, device_id TEXT NOT NULL,
       title TEXT NOT NULL, body TEXT NOT NULL, at INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS delivered (
+      key TEXT PRIMARY KEY NOT NULL,
+      at INTEGER NOT NULL
+    );
     CREATE INDEX IF NOT EXISTS idx_profiles_proc ON profiles(process, started_at DESC);
     CREATE INDEX IF NOT EXISTS idx_alerts_at ON alerts(at DESC);
   `);
 
-  // A phone that installed the earlier build already has `points` without these,
-  // and CREATE TABLE IF NOT EXISTS will not add them. Each ALTER throws
-  // harmlessly if the column is already there.
   for (const col of ADDED_COLUMNS) {
     try {
       await db.execAsync(`ALTER TABLE points ADD COLUMN ${col};`);
     } catch {
-      // column exists
+      // column already exists
     }
   }
 
@@ -57,6 +62,24 @@ const need = () => {
   return db;
 };
 
+/**
+ * Claims an event for notification. Returns true if the caller should notify,
+ * false if something already did within the window.
+ */
+export async function claimDelivery(key: string, windowMs = CLAIM_WINDOW_MS) {
+  const now = Date.now();
+  const row = await need().getFirstAsync<{ at: number }>(
+    `SELECT at FROM delivered WHERE key = ? LIMIT 1`,
+    [key],
+  );
+  if (row && now - row.at < windowMs) return false;
+  await need().runAsync(
+    `INSERT OR REPLACE INTO delivered (key, at) VALUES (?, ?)`,
+    [key, now],
+  );
+  return true;
+}
+
 export async function saveProfile(p: ThermalProfile) {
   await need().runAsync(
     `INSERT OR REPLACE INTO profiles (id, process, device_id, location, started_at, ended_at)
@@ -65,12 +88,21 @@ export async function saveProfile(p: ThermalProfile) {
   );
 }
 
+/** Used by backfill to skip runs already stored. */
+export async function hasProfile(id: string) {
+  const row = await need().getFirstAsync<{ id: string }>(
+    `SELECT id FROM profiles WHERE id = ? LIMIT 1`,
+    [id],
+  );
+  return row != null;
+}
+
 export async function savePoint(profileId: string, pt: ThermalPoint) {
   const z = pt.zones;
   await need().runAsync(
     `INSERT OR REPLACE INTO points
-       (profile_id, t, min, avg, max, fl, fr, bl, br, rh, fan, ambient, moisture)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (profile_id, t, min, avg, max, fl, fr, bl, br, rh, fan, ambient, moisture, weight, session)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       profileId, pt.t, pt.min, pt.avg, pt.max,
       z?.fl ?? null, z?.fr ?? null, z?.bl ?? null, z?.br ?? null,
@@ -78,8 +110,17 @@ export async function savePoint(profileId: string, pt: ThermalPoint) {
       pt.fan == null ? null : pt.fan ? 1 : 0,
       pt.ambient ?? null,
       pt.moisture ?? null,
+      pt.weight ?? null,
+      pt.sessionActive == null ? null : pt.sessionActive ? 1 : 0,
     ],
   );
+}
+
+/** One transaction per run keeps backfill fast; point-by-point writes crawl. */
+export async function savePoints(profileId: string, points: ThermalPoint[]) {
+  await need().withTransactionAsync(async () => {
+    for (const pt of points) await savePoint(profileId, pt);
+  });
 }
 
 export async function closeProfile(id: string, endedAt: number) {
@@ -93,7 +134,7 @@ type Row = {
 
 async function hydrate(row: Row): Promise<ThermalProfile> {
   const pts = await need().getAllAsync<any>(
-    `SELECT t, min, avg, max, fl, fr, bl, br, rh, fan, ambient, moisture
+    `SELECT t, min, avg, max, fl, fr, bl, br, rh, fan, ambient, moisture, weight, session
      FROM points WHERE profile_id = ? ORDER BY t ASC`,
     [row.id],
   );
@@ -110,6 +151,8 @@ async function hydrate(row: Row): Promise<ThermalProfile> {
       fan: p.fan == null ? undefined : p.fan === 1,
       ambient: p.ambient ?? undefined,
       moisture: p.moisture ?? undefined,
+      weight: p.weight ?? undefined,
+      sessionActive: p.session == null ? undefined : p.session === 1,
       zones: p.fl == null ? undefined : { fl: p.fl, fr: p.fr, bl: p.bl, br: p.br },
     })),
   };
@@ -140,7 +183,13 @@ export async function saveAlert(a: ThermalAlert) {
   );
 }
 
-export async function getAlerts(limit = 100): Promise<ThermalAlert[]> {
+export async function saveAlerts(list: ThermalAlert[]) {
+  await need().withTransactionAsync(async () => {
+    for (const a of list) await saveAlert(a);
+  });
+}
+
+export async function getAlerts(limit = 200): Promise<ThermalAlert[]> {
   const rows = await need().getAllAsync<any>(
     `SELECT * FROM alerts ORDER BY at DESC LIMIT ?`,
     [limit],
@@ -157,5 +206,6 @@ async function prune() {
     DELETE FROM points WHERE profile_id IN (SELECT id FROM profiles WHERE started_at < ${cutoff});
     DELETE FROM profiles WHERE started_at < ${cutoff};
     DELETE FROM alerts WHERE at < ${cutoff};
+    DELETE FROM delivered WHERE at < ${Date.now() - 86_400_000};
   `);
 }

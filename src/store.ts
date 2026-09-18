@@ -1,22 +1,23 @@
+import { AppState, AppStateStatus } from 'react-native';
 import { create } from 'zustand';
-import { AlertSettings, DEFAULT_SETTINGS, ProcessDetector } from './alerts/engine';
+import { AlertSettings, backfillAlerts, DEFAULT_SETTINGS, ProcessDetector } from './alerts/engine';
 import { presentAlert, setupNotifications } from './alerts/notifications';
 import { dataSource } from './data';
 import { DEVICES, Process, ThermalAlert, ThermalPoint, ThermalProfile } from './data/types';
 import * as db from './db/database';
+import { listenForPush } from './push/pushListener';
 
 export type Freshness = 'live' | 'stale' | 'last_recorded';
 const LIVE_WINDOW_MS = 2 * 60_000;
+const PROCESSES: Process[] = ['withering', 'fermentation'];
 
 const uid = () => Math.random().toString(36).slice(2, 10);
 
 interface ProcessState {
   active: ThermalProfile | null;
   lastRecorded: ThermalProfile | null;
-  /** Newest reading, run or no run. Drives the value boxes. */
   latest: ThermalPoint | null;
   lastPointAt: number | null;
-  /** Shown on screen when the feed is misbehaving. */
   error: string | null;
 }
 
@@ -28,12 +29,15 @@ interface Store {
   withering: ProcessState;
   fermentation: ProcessState;
   tick: number;
+  syncing: boolean;
 
   init: () => Promise<void>;
   setSettings: (patch: Partial<AlertSettings>) => void;
   freshnessOf: (p: Process) => Freshness;
   markStart: (p: Process) => void;
   markEnd: (p: Process) => void;
+  refresh: () => Promise<void>;
+  reloadAlerts: () => Promise<void>;
 }
 
 const emptyProcess = (): ProcessState => ({
@@ -50,9 +54,20 @@ export const useStore = create<Store>((set, get) => {
   const patch = (process: Process, p: Partial<ProcessState>) =>
     set((s) => ({ [process]: { ...s[process], ...p } } as any));
 
+  const reloadAlerts = async () => set({ alerts: await db.getAlerts() });
+
+  /**
+   * Every alert goes through here, whether the app detected it or the server
+   * pushed it. The first to claim the event notifies; the second is recorded in
+   * history and stays silent, so the phone buzzes once.
+   */
   const pushAlert = async (a: ThermalAlert) => {
     await db.saveAlert(a);
-    set((s) => ({ alerts: [a, ...s.alerts].slice(0, 100) }));
+    set((s) => ({ alerts: [a, ...s.alerts].slice(0, 200) }));
+
+    const shouldNotify = await db.claimDelivery(`${a.process}:${a.kind}`);
+    if (!shouldNotify) return;
+
     const { settings, notificationsAllowed } = get();
     await presentAlert({
       kind: a.kind,
@@ -66,7 +81,7 @@ export const useStore = create<Store>((set, get) => {
 
   const beginProfile = async (process: Process, profile: ThermalProfile) => {
     await db.saveProfile(profile);
-    for (const pt of profile.points) await db.savePoint(profile.id, pt);
+    await db.savePoints(profile.id, profile.points);
     patch(process, { active: profile, lastPointAt: Date.now() });
     detectors[process]?.announceStart(profile, get().settings);
   };
@@ -88,6 +103,62 @@ export const useStore = create<Store>((set, get) => {
     points: [seed],
   });
 
+  /**
+   * Reconstruct what happened while the app was closed. Backfilled alerts are
+   * written to history with their original timestamps and never buzz — a
+   * notification for something six hours old is noise.
+   */
+  const backfill = async (process: Process) => {
+    const source = dataSource as typeof dataSource & {
+      getRecentRuns?: (p: Process, hours?: number) => Promise<ThermalProfile[]>;
+    };
+    if (!source.getRecentRuns) return;
+
+    const runs = await source.getRecentRuns(process);
+    const fresh: ThermalAlert[] = [];
+
+    for (const run of runs) {
+      if (await db.hasProfile(run.id)) continue;
+      await db.saveProfile(run);
+      await db.savePoints(run.id, run.points);
+      fresh.push(...backfillAlerts(run));
+    }
+
+    if (fresh.length) {
+      await db.saveAlerts(fresh);
+      await reloadAlerts();
+    }
+
+    const open = runs.find((r) => r.endedAt == null) ?? null;
+    const done = runs.filter((r) => r.endedAt != null);
+    patch(process, {
+      active: open,
+      lastRecorded: done[done.length - 1] ?? get()[process].lastRecorded,
+      ...(open ? { lastPointAt: Date.now() } : {}),
+    });
+  };
+
+  const syncAll = async () => {
+    if (get().syncing) return;
+    set({ syncing: true });
+    for (const p of PROCESSES) {
+      try {
+        await backfill(p);
+        const source = dataSource as typeof dataSource & {
+          getLatestPoint?: (x: Process) => Promise<ThermalPoint | null>;
+        };
+        if (!get()[p].active && source.getLatestPoint) {
+          const latest = await source.getLatestPoint(p);
+          if (latest) patch(p, { latest, lastPointAt: Date.now() });
+        }
+        patch(p, { error: null });
+      } catch (e) {
+        patch(p, { error: e instanceof Error ? e.message : 'Could not load readings.' });
+      }
+    }
+    set({ syncing: false });
+  };
+
   const wire = (process: Process) => {
     detectors[process] = new ProcessDetector(process, DEVICES[process].deviceId, pushAlert);
 
@@ -96,8 +167,6 @@ export const useStore = create<Store>((set, get) => {
 
       onPoint: async (pt: ThermalPoint) => {
         const st = get()[process];
-
-        // The value boxes always show the newest reading, even with no run on.
         patch(process, { latest: pt, lastPointAt: Date.now(), error: null });
 
         if (st.active) {
@@ -127,6 +196,7 @@ export const useStore = create<Store>((set, get) => {
     withering: emptyProcess(),
     fermentation: emptyProcess(),
     tick: 0,
+    syncing: false,
 
     init: async () => {
       await db.initDb();
@@ -135,52 +205,32 @@ export const useStore = create<Store>((set, get) => {
 
       set({ ready: true, notificationsAllowed: allowed, alerts });
 
-      for (const p of ['withering', 'fermentation'] as Process[]) {
-        const cached = await db.getLastCompleted(p);
-        patch(p, { lastRecorded: cached });
-
-        // Fetch in the background so a slow or failing server does not block
-        // the app from opening. Failures land on screen, not in a log.
-        (async () => {
-          try {
-            const [active, last] = await Promise.all([
-              dataSource.getActiveProfile(p),
-              dataSource.getLastProfile(p),
-            ]);
-            if (active) {
-              await db.saveProfile(active);
-              for (const pt of active.points) await db.savePoint(active.id, pt);
-              patch(p, { active, latest: active.points[active.points.length - 1] });
-            }
-            if (last) {
-              await db.saveProfile(last);
-              for (const pt of last.points) await db.savePoint(last.id, pt);
-              patch(p, { lastRecorded: last });
-            }
-            const anyGetLatest = dataSource as unknown as {
-              getLatestPoint?: (x: Process) => Promise<ThermalPoint | null>;
-            };
-            if (!active && anyGetLatest.getLatestPoint) {
-              const latest = await anyGetLatest.getLatestPoint(p);
-              if (latest) patch(p, { latest, lastPointAt: Date.now() });
-            }
-            patch(p, { error: null });
-          } catch (e) {
-            patch(p, { error: e instanceof Error ? e.message : 'Could not load readings.' });
-          }
-        })();
-
-        wire(p);
+      for (const p of PROCESSES) {
+        patch(p, { lastRecorded: await db.getLastCompleted(p) });
       }
+
+      syncAll();
+      PROCESSES.forEach(wire);
+
+      // A push that lands while the app is open claims its event, so the app's
+      // own detector will not raise the same alert a second time.
+      listenForPush(() => {
+        reloadAlerts();
+      });
+
+      AppState.addEventListener('change', (next: AppStateStatus) => {
+        if (next === 'active') syncAll();
+      });
 
       setInterval(() => {
         const s = get();
-        (['withering', 'fermentation'] as Process[]).forEach((p) =>
-          detectors[p]?.checkStale(s[p].active, s.settings),
-        );
+        PROCESSES.forEach((p) => detectors[p]?.checkStale(s[p].active, s.settings));
         set({ tick: get().tick + 1 });
       }, 1000);
     },
+
+    refresh: syncAll,
+    reloadAlerts,
 
     setSettings: (p) => set((s) => ({ settings: { ...s.settings, ...p } })),
 
