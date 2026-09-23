@@ -1,7 +1,10 @@
 /**
- * All colour in this app means temperature. Live readings are amber (hot,
- * happening now); historical readings are cool grey. Nothing is tinted for
- * decoration, so a supervisor can tell live from stale before reading a word.
+ * Colour in this app means temperature: amber for hot and current, cool
+ * grey-blue for cold and past. Nothing is tinted for decoration.
+ *
+ * The two status colours below are the deliberate exception, added at Dr.
+ * Namal's request — green and red for whether a process is running, which is a
+ * convention people read instantly without being taught it.
  */
 export const C = {
   shell: '#0C120F',
@@ -16,6 +19,10 @@ export const C = {
   cool: '#4C5FD0',
   coolSoft: '#6E8AA8',
   peak: '#FFDFA3',
+  /** Running. */
+  ok: '#4ECB71',
+  /** Not running. */
+  stop: '#E5544F',
 } as const;
 
 export const RADIUS = { card: 18, chip: 12, small: 9 };

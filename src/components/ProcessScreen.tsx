@@ -10,6 +10,9 @@ import { Screen, useLayout } from './Screen';
 
 type Window = 'today' | 'full';
 
+/** Readings older than this mean the node has gone quiet. */
+const REPORTING_WINDOW_MS = 5 * 60_000;
+
 const startOfToday = () => {
   const d = new Date();
   d.setHours(0, 0, 0, 0);
@@ -32,35 +35,40 @@ export default function ProcessScreen({ process }: { process: Process }) {
   const running = freshness !== 'last_recorded';
   const profile = state.active ?? state.lastRecorded;
   const latest = state.latest ?? profile?.points[profile.points.length - 1] ?? null;
-  const accent = running ? C.hot : C.coolSoft;
 
-  /**
-   * A run that carries over midnight — or one that has not ended when it should
-   * have — makes the whole-run chart unreadable. Today's readings are the
-   * default view; the full run stays one tap away.
-   */
   const { shown, spansEarlierDay } = useMemo(() => {
     const all: ThermalPoint[] = profile?.points ?? [];
     const cutoff = startOfToday();
     const earlier = all.length > 0 && all[0].t < cutoff;
     if (window === 'full' || !earlier) return { shown: all, spansEarlierDay: earlier };
     const today = all.filter((p) => p.t >= cutoff);
-    // Fall back to the full run rather than draw a chart from one or two points.
     return { shown: today.length >= 2 ? today : all, spansEarlierDay: earlier };
   }, [profile, window]);
 
-  const secondsAgo = Math.round((Date.now() - (state.lastPointAt ?? Date.now())) / 1000);
-  const reporting = state.lastPointAt != null && Date.now() - state.lastPointAt < 5 * 60_000;
+  // The newest reading, whichever route it arrived by. Without this the screen
+  // could show live values and still claim there were no readings.
+  const lastReadingAt = Math.max(state.lastPointAt ?? 0, latest?.t ?? 0) || null;
+  const reporting = lastReadingAt != null && Date.now() - lastReadingAt < REPORTING_WINDOW_MS;
+  const secondsAgo = Math.round((Date.now() - (lastReadingAt ?? Date.now())) / 1000);
 
-  const statusText = running
-    ? freshness === 'live'
-      ? `Run in progress, updated ${secondsAgo} second${secondsAgo === 1 ? '' : 's'} ago`
-      : `Run in progress, no readings for ${fmtDuration(Date.now() - (state.lastPointAt ?? 0))}`
-    : reporting
-      ? 'Sensors reporting, no run in progress'
-      : profile
-        ? 'Nothing running. Showing the last recorded profile.'
-        : 'No readings.';
+  const status = running
+    ? {
+        text: 'Running',
+        detail:
+          freshness === 'live'
+            ? `updated ${secondsAgo} second${secondsAgo === 1 ? '' : 's'} ago`
+            : `no readings for ${fmtDuration(Date.now() - (lastReadingAt ?? 0))}`,
+        colour: C.ok,
+      }
+    : {
+        text: 'Not running',
+        detail: reporting
+          ? 'sensors reporting normally'
+          : lastReadingAt
+            ? `last reading ${fmtClock(lastReadingAt)}`
+            : 'no readings yet',
+        colour: C.stop,
+      };
 
   const band = shown.length > 0 ? hasBand(shown) : false;
   const showsAmbient = shown.length > 0 && shown.every((p) => p.ambient != null);
@@ -74,6 +82,7 @@ export default function ProcessScreen({ process }: { process: Process }) {
 
   return (
     <Screen>
+      {/* Centred and in the app's accent, so the tab you are on is obvious. */}
       <View style={s.head}>
         <Text style={[s.title, wide && s.titleWide]}>{PROCESS_LABEL[process]}</Text>
         <Text style={s.sub}>{profile?.location ?? PROCESS_LABEL[process]}</Text>
@@ -86,9 +95,11 @@ export default function ProcessScreen({ process }: { process: Process }) {
         </View>
       )}
 
-      <View style={[s.status, { backgroundColor: accent + '1A', borderColor: accent + '47' }]}>
-        <View style={[s.dot, { backgroundColor: accent }]} />
-        <Text style={[s.statusText, { color: running ? C.peak : '#B6C7D4' }]}>{statusText}</Text>
+      <View style={[s.status, { backgroundColor: status.colour + '1A', borderColor: status.colour + '55' }]}>
+        <Text style={[s.statusText, wide && s.statusTextWide, { color: status.colour }]}>
+          {status.text}
+        </Text>
+        <Text style={s.statusDetail}>{status.detail}</Text>
       </View>
 
       {latest ? (
@@ -127,14 +138,16 @@ export default function ProcessScreen({ process }: { process: Process }) {
       )}
 
       {profile && shown.length >= 2 ? (
-        <View style={s.card}>
-          <View style={s.cardHead}>
-            <Text style={s.cardTitle}>{state.active ? 'Profile' : 'Last recorded run'}</Text>
-            <Text style={s.cardMeta}>
-              {fmtClock(shown[0].t)}
-              {state.active && window !== 'today' ? ' to now' : ` to ${fmtClock(shown[shown.length - 1].t)}`}
-            </Text>
-          </View>
+        <View style={[s.card, s.cardHighlight]}>
+          {/* The run heading carries the same weight as the page title, since
+              it is the thing a supervisor came to the screen to read. */}
+          <Text style={[s.runTitle, wide && s.runTitleWide]}>
+            {state.active ? 'Current run' : 'Last recorded run'}
+          </Text>
+          <Text style={s.runRange}>
+            {fmtClock(shown[0].t)}
+            {state.active && window !== 'today' ? ' to now' : ` to ${fmtClock(shown[shown.length - 1].t)}`}
+          </Text>
 
           {spansEarlierDay && (
             <View style={s.range}>
@@ -185,7 +198,7 @@ export default function ProcessScreen({ process }: { process: Process }) {
         </View>
       ) : (
         <View style={s.card}>
-          <Text style={s.cardTitle}>No completed run yet</Text>
+          <Text style={[s.runTitle, wide && s.runTitleWide]}>No completed run yet</Text>
           <Text style={s.explain}>
             {reporting
               ? 'The sensors are reporting but no run has been recorded. The profile will appear here once one starts.'
@@ -196,10 +209,10 @@ export default function ProcessScreen({ process }: { process: Process }) {
 
       {settings.manualOverride[process] && (
         <Pressable
-          style={[s.manual, { borderColor: accent }]}
+          style={[s.manual, { borderColor: status.colour }]}
           onPress={() => (state.active ? markEnd(process) : markStart(process))}
         >
-          <Text style={[s.manualText, { color: accent }]}>
+          <Text style={[s.manualText, { color: status.colour }]}>
             {state.active ? 'Mark run finished' : 'Mark run started'}
           </Text>
         </Pressable>
@@ -209,10 +222,10 @@ export default function ProcessScreen({ process }: { process: Process }) {
 }
 
 const s = StyleSheet.create({
-  head: { marginBottom: 14 },
-  title: { color: C.ink, fontSize: 26, fontWeight: '700', letterSpacing: -0.5 },
-  titleWide: { fontSize: 32 },
-  sub: { color: C.ink2, fontSize: 13.5, marginTop: 2 },
+  head: { marginBottom: 16, alignItems: 'center' },
+  title: { color: C.hot, fontSize: 34, fontWeight: '700', letterSpacing: -0.6, textAlign: 'center' },
+  titleWide: { fontSize: 42 },
+  sub: { color: C.ink2, fontSize: 13.5, marginTop: 2, textAlign: 'center' },
 
   error: {
     backgroundColor: C.warm + '1A', borderColor: C.warm + '55', borderWidth: 1,
@@ -222,12 +235,13 @@ const s = StyleSheet.create({
   errorBody: { color: C.peak, fontSize: 13, lineHeight: 19 },
 
   status: {
-    flexDirection: 'row', alignItems: 'center', gap: 9,
-    paddingVertical: 9, paddingHorizontal: 13,
-    borderRadius: RADIUS.chip, borderWidth: 1, marginBottom: 16,
+    alignItems: 'center',
+    paddingVertical: 13, paddingHorizontal: 14,
+    borderRadius: RADIUS.chip, borderWidth: 1, marginBottom: 18,
   },
-  dot: { width: 8, height: 8, borderRadius: 4 },
-  statusText: { fontSize: 13.5, flex: 1 },
+  statusText: { fontSize: 22, fontWeight: '700', letterSpacing: -0.3 },
+  statusTextWide: { fontSize: 26 },
+  statusDetail: { color: C.ink2, fontSize: 13, marginTop: 3, textAlign: 'center' },
 
   metrics: { gap: 10, marginBottom: 18 },
   metricRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 },
@@ -246,16 +260,19 @@ const s = StyleSheet.create({
     backgroundColor: C.panel, borderColor: C.line, borderWidth: 1,
     borderRadius: RADIUS.card, padding: 15, marginBottom: 14,
   },
-  cardHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline' },
-  cardTitle: { color: C.ink, fontSize: 14.5, fontWeight: '600' },
-  cardMeta: { color: C.ink3, fontSize: 12.5 },
-  chartNote: { color: C.ink3, fontSize: 12.5, marginTop: 2, marginBottom: 10 },
+  cardHighlight: { borderColor: C.hot + '4D', backgroundColor: C.hot + '0D' },
+
+  runTitle: { color: C.hot, fontSize: 20, fontWeight: '700', letterSpacing: -0.3 },
+  runTitleWide: { fontSize: 24 },
+  runRange: { color: C.ink2, fontSize: 13.5, marginTop: 2 },
+
+  chartNote: { color: C.ink3, fontSize: 12.5, marginTop: 8, marginBottom: 10 },
   explain: { color: C.ink2, fontSize: 13, lineHeight: 20, marginTop: 6 },
   windowNote: { color: C.ink3, fontSize: 12, lineHeight: 17, marginTop: 10 },
 
   range: {
     flexDirection: 'row', gap: 6, backgroundColor: C.panel2,
-    borderRadius: 11, padding: 4, marginTop: 10, marginBottom: 4,
+    borderRadius: 11, padding: 4, marginTop: 12, marginBottom: 2,
   },
   rangeBtn: { flex: 1, paddingVertical: 7, borderRadius: 8, alignItems: 'center' },
   rangeBtnOn: { backgroundColor: C.panel },
